@@ -14,11 +14,16 @@
 
 #define BUTTON_0_PIN 27 // the white Button 
 
+#define SERVER_CONNECT_REQUEST_BYTE 0x66
+#define SERVER_CONNECT_RESPONSE_BYTE 0x77
+#define SERVER_CONNECT_VALIDATION_BYTE 0x88
+#define SERVER_UART_RX_TIMEOUT 500 // ms, if cmd sent over uart lags more than this amount of time or other error occurs, invoke SOS sequence to stop the robot
 #define SERVER_UART_TX_FREQ 50 //Hz
 #define SERVER_UART_BAUDRATE 115200
 #define SERVER_UART_NUM UART_NUM_0
 #define UART_RX_BUF_SIZE (1024)
 #define UART_TX_BUF_SIZE (128)
+
 #define delay(MILLIS) vTaskDelay(MILLIS / portTICK_PERIOD_MS);
 
 //==============================================================================//
@@ -53,7 +58,7 @@ static void init_server_uart();
 
 static void serial_server_tx_task();
 static void process_cmd(uint8_t* cmd_bytes, uint32_t num_bytes);
-static void invokeSOS();
+static void invoke_SOS();
 
 
 // QueueHandle_t gpio_evt_queue = NULL;
@@ -81,14 +86,14 @@ static void mock_test_task() {
 }
 
 static void dummy_test() {
-    while(1) {
-        if(gpio_get_level(BUTTON_0_PIN)) {
-            gpio_set_level(ESP_LED_PIN, ON);
-        } else {
-            gpio_set_level(ESP_LED_PIN, OFF);
-        }
-        delay(10);
-    }
+    // while(1) {
+    //     if(gpio_get_level(BUTTON_0_PIN)) {
+    //         gpio_set_level(ESP_LED_PIN, ON);
+    //     } else {
+    //         gpio_set_level(ESP_LED_PIN, OFF);
+    //     }
+    //     delay(10);
+    // }
     // uint32_t io_num;
     // uint8_t b0_state = 0;
     // while(1) {
@@ -100,9 +105,33 @@ static void dummy_test() {
 
     //     gpio_set_level(ESP_LED_PIN, b0_state);
     // }
+    gpio_reset_pin(26);
+    gpio_set_direction(26, GPIO_MODE_OUTPUT);
+    while(1) {
+        gpio_set_level(26, 0);
+        delay(20);
+        gpio_set_level(26, 1);
+        delay(20);
+    }
 }
 
-
+static void wait_for_connect_seq() {
+    gpio_set_level(ESP_LED_PIN, ON);
+    uint8_t in_byte = 0;
+    uint8_t connection_established = 0;
+    while(!connection_established) {
+        uart_read_bytes(SERVER_UART_NUM, &in_byte, 1, SERVER_UART_RX_TIMEOUT);
+        if(in_byte == SERVER_CONNECT_REQUEST_BYTE) {
+            uint8_t response_byte = SERVER_CONNECT_RESPONSE_BYTE;
+            uart_write_bytes(SERVER_UART_NUM, &response_byte, 1);
+            uart_read_bytes(SERVER_UART_NUM, &in_byte, 1, SERVER_UART_RX_TIMEOUT);
+            if(in_byte == SERVER_CONNECT_VALIDATION_BYTE) {
+                connection_established = 1;
+            }
+        }
+    }
+    gpio_set_level(ESP_LED_PIN, OFF);
+}
 
 static void setup() {
     init_mutexes();
@@ -129,12 +158,15 @@ static void setup() {
 void app_main(void)
 {
     setup();
+
     //dummy_test();
 
-    xTaskCreate(serial_server_tx_task, "serial_server_tx_task", 2*1024, NULL, configMAX_PRIORITIES, NULL);
+    wait_for_connect_seq();
+
+    //xTaskCreate(serial_server_tx_task, "serial_server_tx_task", 2*1024, NULL, configMAX_PRIORITIES, NULL);
     xTaskCreate(mock_test_task, "mock_test_task", 1024, NULL, configMAX_PRIORITIES, NULL);
 
-    uint8_t* packet_frame_head = (uint8_t*)malloc(2+1);
+    uint8_t packet_frame_head;
     uint8_t* packet_data = (uint8_t*) malloc(UART_TX_BUF_SIZE + 1);
     uint8_t packet_frame_tail;
     while(1) {
@@ -148,25 +180,27 @@ void app_main(void)
          */
 
         // read one byte from UART
-        uart_read_bytes(SERVER_UART_NUM, packet_frame_head, 2, portMAX_DELAY);
-        if((char)(packet_frame_head[0]) == '#') {
-            uint8_t packet_size = packet_frame_head[1];
-            //printf("%x\n", packet_frame_head[1]);
-            //uart_write_bytes(SERVER_UART_NUM, &packet_size, 1);
-
-            uart_read_bytes(SERVER_UART_NUM, packet_data, (uint32_t)packet_size, portMAX_DELAY);
-            uart_read_bytes(SERVER_UART_NUM, &packet_frame_tail, 1, portMAX_DELAY);
-            if((char)packet_frame_tail == '\n') {
-                gpio_set_level(ESP_LED_PIN, ON);
-                process_cmd(packet_data, (uint32_t)packet_size);
-            } else {
-                gpio_set_level(ESP_LED_PIN, OFF);
-            }
-        } else{
-            gpio_set_level(ESP_LED_PIN, OFF);
+        if(uart_read_bytes(SERVER_UART_NUM, &packet_frame_head, 1, SERVER_UART_RX_TIMEOUT) <= 0) {
+            // Error or Timeout occurred
+            invoke_SOS();
         }
+        if((char)packet_frame_head == '#') {
+            uint8_t packet_size = 0;
+            if(uart_read_bytes(SERVER_UART_NUM, &packet_size, 1, SERVER_UART_RX_TIMEOUT) > 0) {
+                //printf("%x %x\n", packet_frame_head, packet_size);
+                //uart_write_bytes(SERVER_UART_NUM, &packet_size, 1);
+                if(uart_read_bytes(SERVER_UART_NUM, packet_data, (uint32_t)packet_size, SERVER_UART_RX_TIMEOUT) > 0) {
+                    if(uart_read_bytes(SERVER_UART_NUM, &packet_frame_tail, 1, SERVER_UART_RX_TIMEOUT) > 0) {
+                        if((char)packet_frame_tail == '\n') {
+                            //gpio_set_level(ESP_LED_PIN, ON);
+                            process_cmd(packet_data, (uint32_t)packet_size);
+                        }
+                    }
+                }
+            }
+        } 
     }
-    invokeSOS();
+    invoke_SOS();
     free(packet_frame_head);
     free(packet_data);
 }
@@ -186,17 +220,21 @@ static void init_server_uart() {
 }
 
 /* emergency stop & shutdown */
-static void invokeSOS() {
+static void invoke_SOS() {
     while(1) {
-        gpio_set_level(ESP_LED_PIN, ON);
-        delay(500);
-        gpio_set_level(ESP_LED_PIN, OFF);
-        delay(500);
+        for(int i = 0; i < 6; i++) {
+            gpio_set_level(ESP_LED_PIN, ON);
+            delay(50);
+            gpio_set_level(ESP_LED_PIN, OFF);
+            delay(50);
+        }
+        delay(1000);
     }
+    esp_restart();
 }
 
 static void process_cmd(uint8_t* cmd_bytes, uint32_t num_bytes) {
-    //uart_write_bytes(SERVER_UART_NUM, cmd_bytes, num_bytes);
+    uart_write_bytes(SERVER_UART_NUM, cmd_bytes, num_bytes);
 }
 
 
@@ -209,23 +247,23 @@ static void serial_server_tx_task() {
         uint8_t num_bytes = 2; // num < 256
         //================================================================================//
     
-        xSemaphoreTake(steer_angle_mutex, portMAX_DELAY );
+        xSemaphoreTake(steer_angle_mutex, portMAX_DELAY);
         memcpy(data_bytes + num_bytes, (uint8_t*)(&steer_angle), 4);
         xSemaphoreGive(steer_angle_mutex);
         num_bytes += 4;
 
-        xSemaphoreTake(ambient_light_mutex, portMAX_DELAY );
+        xSemaphoreTake(ambient_light_mutex, portMAX_DELAY);
         memcpy(data_bytes + num_bytes, (uint8_t*)(&ambient_light), 4);
         xSemaphoreGive(ambient_light_mutex);
         num_bytes += 4;
 
-        xSemaphoreTake(tofs_mutex, portMAX_DELAY );
+        xSemaphoreTake(tofs_mutex, portMAX_DELAY);
         memcpy(data_bytes + num_bytes, (uint8_t*)(&left_front_ToF), 4);
         memcpy(data_bytes + num_bytes, (uint8_t*)(&right_front_ToF), 4);
         xSemaphoreGive(tofs_mutex);
         num_bytes += 8;
 
-        xSemaphoreTake(ultrasonic_mutex, portMAX_DELAY );
+        xSemaphoreTake(ultrasonic_mutex, portMAX_DELAY);
         memcpy(data_bytes + num_bytes, (uint8_t*)(&reer_ultrasonic), 4);
         xSemaphoreGive(ultrasonic_mutex);
         num_bytes += 4;

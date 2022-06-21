@@ -19,8 +19,8 @@ sleep(1)
 
 while True:
     uart.write(packet_head + packet_data + b'\n')
-    line = uart.readline()
-    print(line.decode('ascii'), end='')
+    #line = uart.readline()
+    #print(line.decode('ascii'), end='')
     sleep(0.05)
 
 
