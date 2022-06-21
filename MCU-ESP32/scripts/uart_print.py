@@ -10,7 +10,8 @@ uart = serial.Serial('/dev/ttyUSB0', 115200, 8, serial.PARITY_ODD)
 #print(uart.name)
 while True:
     line = uart.readline()
-    print(line.decode('ascii'), end='')
+    print(line)
+    #print(line.decode('ascii'), end='')
 
 
 uart.close()

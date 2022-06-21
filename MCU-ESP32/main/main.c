@@ -43,11 +43,17 @@ float reer_ultrasonic = 0.00f; // (0~???) [cm]
 
 uint8_t buttons_bits = 0x00; // (0x00~0x7F) LSB-Button0, MSB-Button7
 
+
+
+SemaphoreHandle_t sos_mutex = NULL;
+uint8_t sos_flag = 0;
+
 static void init_mutexes() {
     steer_angle_mutex = xSemaphoreCreateMutex();
     ambient_light_mutex = xSemaphoreCreateMutex();
     tofs_mutex = xSemaphoreCreateMutex();
     ultrasonic_mutex = xSemaphoreCreateMutex();
+    sos_mutex = xSemaphoreCreateMutex();
 }
 //==============================================================================//
 
@@ -58,6 +64,7 @@ static void init_server_uart();
 
 static void serial_server_tx_task();
 static void process_cmd(uint8_t* cmd_bytes, uint32_t num_bytes);
+
 static void invoke_SOS();
 
 
@@ -120,11 +127,12 @@ static void wait_for_connect_seq() {
     uint8_t in_byte = 0;
     uint8_t connection_established = 0;
     while(!connection_established) {
-        uart_read_bytes(SERVER_UART_NUM, &in_byte, 1, SERVER_UART_RX_TIMEOUT);
+        uart_read_bytes(SERVER_UART_NUM, &in_byte, 1, 1000);
         if(in_byte == SERVER_CONNECT_REQUEST_BYTE) {
             uint8_t response_byte = SERVER_CONNECT_RESPONSE_BYTE;
+            delay(100);
             uart_write_bytes(SERVER_UART_NUM, &response_byte, 1);
-            uart_read_bytes(SERVER_UART_NUM, &in_byte, 1, SERVER_UART_RX_TIMEOUT);
+            uart_read_bytes(SERVER_UART_NUM, &in_byte, 1, 1000);
             if(in_byte == SERVER_CONNECT_VALIDATION_BYTE) {
                 connection_established = 1;
             }
@@ -154,6 +162,7 @@ static void setup() {
     init_server_uart();
 }
 
+/* sudo chmod a+rw /dev/ttyUSB0 */
 
 void app_main(void)
 {
@@ -221,6 +230,9 @@ static void init_server_uart() {
 
 /* emergency stop & shutdown */
 static void invoke_SOS() {
+    xSemaphoreTake(sos_mutex, portMAX_DELAY);
+    sos_flag = 1;
+    xSemaphoreGive(sos_mutex);
     while(1) {
         for(int i = 0; i < 6; i++) {
             gpio_set_level(ESP_LED_PIN, ON);
@@ -235,6 +247,7 @@ static void invoke_SOS() {
 
 static void process_cmd(uint8_t* cmd_bytes, uint32_t num_bytes) {
     uart_write_bytes(SERVER_UART_NUM, cmd_bytes, num_bytes);
+    printf("\n");
 }
 
 
@@ -242,7 +255,10 @@ static void serial_server_tx_task() {
     uint8_t* data_bytes = (uint8_t*) malloc(UART_TX_BUF_SIZE + 1);
     while(1) {
         /* set packet head */
-        data_bytes[0] = (uint8_t)'#';
+        xSemaphoreTake(sos_mutex, portMAX_DELAY);
+        data_bytes[0] = (!sos_flag)? (uint8_t)'#' : (uint8_t)'!';
+        xSemaphoreGive(sos_mutex);
+        
         data_bytes[1] = 0x00;  // 0x00 is a dummy value; will bet set below
         uint8_t num_bytes = 2; // num < 256
         //================================================================================//
